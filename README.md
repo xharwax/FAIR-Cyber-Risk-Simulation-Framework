@@ -209,8 +209,6 @@ Outputs:
 
 FAIR–MITRE ATT&CK Quantitative Cyber Risk Framework
 
-Copyright 2025 Joshua M. Connors
-
-Licensed under the Apache License, Version 2.0.
+Copyright 2025 Debuire Théo
 
 This software incorporates public data from the MITRE ATT&CK® framework.
