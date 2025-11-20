@@ -1,0 +1,255 @@
+FAIR + MITRE ATT&CK vs Threats: This model fights back!
+ChatGPT Image Nov 5, 2025, 02_53_21 PM
+Ever wondered what happens when FAIR meets MITRE ATT&CK (and a little Bayesian magic)? This FAIR-MITRE model doesn’t just map threats — it thinks like an attacker, adapting across the kill chain and quantifying financial impact. Security leaders deserve more than red-amber-green dashboards — they deserve data-driven decisions with real financial context. This model was designed to provide that.
+
+Introduction
+In this article I will provide a detailed, behind-the-scenes walkthrough of the FAIR–MITRE ATT&CK Quantitative Risk Modeling Framework, covering how each script functions, how data flows between them, how analysts and developers can tune variables to explore alternate threat or control scenarios, and some insight into my thought process for some of the design choices and baked-in assumptions.
+
+Unlike the README, which focuses on how to run the model, this guide explains how the model works — diving into the computational and probabilistic logic underpinning the system.
+
+By the end, I hope you will understand how the framework ties together:
+
+MITRE ATT&CK’s structured threat and control ontology
+FAIR’s loss-based risk modeling
+Bayesian inference (via PyMC)
+Stochastic simulation logic and adaptability modeling
+And finally, some insight into what I personally am doing with the model using an autonomous Agent container.
+System Overview
+At a high level, the framework follows a four-phase pipeline:
+
+Data Extraction – Building a baseline of mitigations and techniques from MITRE ATT&CK.
+Relevance Scoping – Offering the option of filtering the dataset to only include tactics and techniques associated with specific threat actors or campaigns of interest.
+Control Strength Computation – Aggregating mitigation-level data into tactic-level control strength distributions and generating visual dashboards.
+Quantitative Risk Modeling – Using Bayesian inference and Monte Carlo simulation to model attacker progression, control effectiveness, and resulting financial losses.
+These phases are implemented across four Python scripts:
+
+Script	Role
+build_mitigation_influence_template.py	Creates a baseline template of mitigations, coverage, and seed control strength ranges.
+build_technique_relevance_template.py	Generates a matrix of relevant techniques by tactic, optionally filtered by ATT&CK campaigns or threat actors.
+mitre_control_strength_dashboard.py	Aggregates mitigations into tactic-level weighted control strengths, applies gating logic, and produces a visual dashboard.
+cyber_incident_pymc.py	Runs the Bayesian risk simulation, integrating FAIR-style loss modeling with MITRE-informed control distributions.
+1. build_mitigation_influence_template.py
+Purpose
+This script is core to defining the resistance strength component of FAIR. It constructs the baseline CSV used across the rest of the system for the aggregation of control strength up to each in scope MITRE ATT&CK Tactic. It builds a list of unique Mitigations using MITRE’s Enterprise ATT&CK JSON dataset (enterprise-attack.json), identifies all course-of-action objects (mitigations), and maps them to the attack patterns (techniques) they mitigate. The reason for building it this way is to ensure the model can quickly adapt if/when the MITRE ATT&CK framework is extended to include additional Mitigations or new mappings between Techniques and Mitigations. All you need to do is download the new Enterprise Attack JSON file and the model will populate the CSV with the latest information.
+
+Note: I haven't tested this yet, but in theory this would also allow the model to easily support the other MITRE ATT&CK matrices (ICS and Mobile).
+
+Each mitigation is scored by:
+
+How many techniques it mitigates.
+How many tactics those techniques span.
+A normalized weight based on relative coverage.
+A randomized default strength range (Control_Min / Control_Max).
+These metrics serve as the foundation for subsequent weighted strength calculations and Monte Carlo sampling.
+
+Flow Summary
+Load MITRE dataset (STIX bundle).
+Extract mitigations (course-of-action), techniques (attack-pattern), and relationships (mitigates).
+Build mappings between mitigations and techniques.
+Compute influence metrics (techniques mitigated, tactics covered).
+Assign a random default strength range (e.g., 30–70%).
+Output results to mitigation_influence_template.csv.
+Key Variables
+Variable	Description	Typical Range
+default_ranges	Randomly seeded strength ranges for mitigations (in percent).	[(30,70), (35,65), (40,60)]
+random.seed(42)	Controls deterministic randomization.	Any integer
+Weight	Computed influence of each mitigation, normalized to 0–1.	Auto-calculated
+Tunable Elements
+Analysts can manually edit Control_Min and Control_Max within the generated CSV to align with internal maturity assessments before running subsequent steps.
+
+2. build_technique_relevance_template.py
+Purpose
+This script is central to enabling MITRE ATT&CK Technique aware risk modeling. Many threat intelligence feeds will provide details on the preferred or typical Techniques that threat actors utilize. The CSV template produced by this script allows an analyst to indicate what Techniques they are focused on modeling. This will then flow through the model to customize what Tactics and Mitigations are included in the simulations. This ensures the simulation only models tactics and mitigations that are relevant to the entity being analyzed (e.g., APT29, FIN7, or campaign C0017).
+
+The script generates technique_relevance.csv, which the analyst will use to scope the risk model to specific threat actors, malware families, or campaigns.
+
+Flow Summary
+Load the MITRE ATT&CK Enterprise JSON.
+Enumerate all attack-patterns and their associated tactics.
+Optionally pull techniques from:
+One or more procedures (--procedure "APT29").
+One or more campaigns (--campaign C0017).
+Output:
+A CSV checklist with columns: Tactic, Technique ID, Technique, Relevant.
+A JSON evidence file documenting what was auto-marked.
+Key Variables
+Variable	Description
+--procedure	Name of a threat actor or malware/tool to auto-mark techniques for.
+--campaign	MITRE campaign ID (e.g., C0017).
+--mark-all	Mark all techniques as relevant (useful for organization-wide baselines).
+--dedupe-names	Remove duplicate techniques under each tactic.
+Tunable Elements
+Editing the generated CSV lets analysts decide which techniques are in-scope (Relevant = X).
+This scoping directly influences which controls and tactics appear in the dashboard and risk simulation.
+
+3. mitre_control_strength_dashboard.py
+Purpose
+This script aggregates mitigation control strengths into tactic-level weighted averages, applies relevance filters, and generates an interactive Plotly dashboard that visualizes defensive posture across the MITRE ATT&CK kill chain.
+
+Some additional context on the impact gating reference below in the flow summary. The idea behind this logic is that there are some controls that not only reduce the likelihood/frequency of an event, but also can reduce the impact/magnitude of the event. Currently there are two controls within the model that do this. They are the Encrypt Sensitive Data and Data Backup mitigations. These controls can reduce the assessed impact of a successful event, but only under certain circumstances.
+
+The Encrypt Sensitive Data mitigation will reduce the secondary impacts (regulatory and reputational) if the Data Exfiltration Tactic is in scope for the assessment.
+The Data Backup mitigation will reduce the primary impacts (productivity and response) only if the Data Backup Mitigation is tied to an in scope Impact Technique.
+There are also a number of Mitigations that are intentionally under-weighted in the control strength aggregation logic. The reason for this is that there are some controls that do not directly reduce the likelihood or impact of an event. These controls typically exist primarily to identify deviations in or to inform the scope of other controls. An example would be vulnerability scanning. Scanning systems on its own doesn't do anything to reduce risk. What it does is provide monitoring and insight into the effectiveness of patching processes and can inform management's prioritization of future patching. This concept is laid out in the FAIR-CAM standard that you can find on the FAIR Institute site if you are interested in learning more.
+
+Flow Summary
+Load ATT&CK dataset and mitigation relationships.
+Load the mitigation_control_strengths.csv file (or baseline template).
+If technique_relevance.csv is present, restrict to relevant techniques/tactics.
+Compute weighted mean/min/max control strengths per tactic.
+Apply impact gating logic:
+“Encrypt Sensitive Information” → only if Exfiltration tactic is in-scope.
+“Data Backup” → only if Impact tactics include backup techniques.
+Save results:
+Interactive dashboard (mitre_tactic_strengths_*.html)
+Weighted summary CSV (filtered_summary_*.csv)
+Key Variables
+Variable	Description	Notes
+DISCOUNT_CONTROLS	List of generic mitigations (Audit, User Training, etc.) discounted by 50%.	Reduces overcounting of generic hygiene controls.
+MAX_HOVER_ITEMS	Maximum mitigations shown in hover popups (default: 20).	Prevents visual overflow.
+USE_RELEVANCE_CSV	Whether to automatically apply relevance filtering.	Default: True
+impact_reduction_controls	Captures “Backup” and “Encryption” mitigation strengths for impact reduction modeling.	Passed downstream to risk model.
+Tunable Elements
+Analysts can alter the strength CSV to reflect organizational posture.
+discount_controls can be modified to fine-tune control weighting.
+Adjusting MAX_HOVER_ITEMS controls dashboard interactivity.
+4. cyber_incident_pymc.py
+Purpose
+This is where most of the magic happens! It is the core simulation engine that combines Bayesian inference with stochastic simulation. It uses the control strength outputs from the dashboard to simulate attack success and resulting financial loss distributions in a FAIR-consistent way.
+
+There is a lot going on in this script and I'll do my best to explain it all and the reasoning behind it.
+
+Starting out there are the equivalents of all of the nodes in FAIR taxonomy, these are:
+
+Threat Event Frequency (TEF): these are captured in the CI_MIN_FREQ and CI_MAX_FREQ variables. This model uses a 90% confidence interval estimate of the minimum and maximum values to generate a lognormal distribution to represent the frequency that you expect your organization will encounter the threat actor(s) you are modeling.
+Threat Capability (TCap): the variable THREAT_CAPABILITY_RANGE is used to capture this range. Again this is based on a 90% confidence interval and reflects the estimated range of threat actors resourcing and abilities. This is used in modeling whether the threat actors capabilities are stronger than the control strength when modeling the attacker progression through the MITRE ATT&CK kill chain.
+Threat Actor Adaptability: This is something that is a bit unique to this model and operates along with TCap in modeling the success of a threat actor. While TCap is used to model whether an attacker is able to overcome the strength of your controls, adaptability is used primarily in modeling attackers ability to respond after failure. The model permits attacker to retry or fallback when they fail to overcome the controls within a Tactic. Adaptability helps determine the success of any retries or fallbacks. This allows you to decouple the ideas of how well resourced or skilled an attacker is from their ability to be nimble and react to failures (i.e. do they persist or do they just give up). Other variables that play into the modeling of attacker behavior are MAX_RETRIES_PER_STAGE, FALLBACK_PROB, and DETECT_* variables.
+Control/ Resistance Strength: See discussion above of mitre_control_strength_dashboard.py
+Primary Losses: capture the types of losses that an analyst would expect to see in any successful event that relate to the organization that was attacked. These values are captured in loss_q5_q95 variables as Productivity and ResponseContainment. These again are captured as 90% confidence intervals and represent dollars. In the default version of the script you will notice that the numbers use underscores instead of commas; this is standard for number in Python code. You can also enter these as simple integers without any underscores or commas.
+Secondary Losses: captures losses that result from external parties responses to an event, such as customers or regulators. These losses are also captured in loss_q5_q95 in the variables RegulatoryLegal and ReputationCompetitive. The secondary losses have another set of variables captured in pareto_defaults, as RegulatoryLegal and ReputationCompetitive. This variable captures the small probability of very large (long tail) secondary losses that can materialize when an event is really bad (i.e. a very large amount of data is lost or you are the source of a very significant supply-chain event, such as the SolarWinds breach).
+There are several other variables that play varying roles in the model that are included in the table below. But the ones described above are the primary ones I assume most analysts would want to tune to their environment.
+
+Flow Summary
+Load control strengths from the dashboard summary or fallback SME map.
+Build priors for:
+Attack frequency (λ) — lognormal prior.
+Per-tactic success probabilities — Beta priors.
+Sample posterior distributions using PyMC (or fallback to numpy if PyMC unavailable).
+Simulate attack attempts:
+Retry logic, fallback probabilities, detection rates, and adaptive learning.
+Compute per-draw annualized losses, applying stochastic impact reductions.
+Generate summaries (AAL, SLE, credible intervals).
+Visualize results — histograms, exceedance curves, and diagnostic dashboards.
+Core Variables & Tuning Parameters
+Variable	Purpose	Typical Range / Default
+Frequency Priors		
+CI_MIN_FREQ, CI_MAX_FREQ	90% confidence interval for annual attempt rate (used to fit lognormal). This is the equivalent of Threat Event Frequency (TEF) in FAIR.	4–24
+Sampling Controls		
+N_SAMPLES, N_TUNE, N_CHAINS	PyMC MCMC parameters controlling sample size, warmup, and chain count.	4000 / 1000 / 4
+TARGET_ACCEPT	PyMC sampler acceptance target (stability vs speed).	0.90
+Threat & Adaptability		
+THREAT_CAPABILITY_RANGE	Controls how capable adversaries are (higher = stronger).	(0.4, 0.95)
+ADAPTABILITY_RANGE	Controls attacker learning speed between retries.	(0.3, 0.9)
+MAX_RETRIES_PER_STAGE	Maximum retry attempts per tactic stage.	3
+FALLBACK_PROB	Probability of returning to a prior stage after failure.	0.25
+DETECT_BASE, DETECT_INC_PER_RETRY	Base detection probability and per-retry increment.	0.01 / 0.03
+Impact Reduction Controls		
+BACKUP_IMPACT_MULT, ENCRYPT_IMPACT_MULT	Multipliers reducing losses when backup/encryption controls apply.	0.60 / 0.50
+STOCHASTIC_IMPACT_REDUCTION	If True, sample random strength per draw; else use mean.	True
+Loss Modeling		
+loss_q5_q95	FAIR-style per-category 5th/95th percentile bounds (USD).	See script defaults
+pareto_defaults	Tail parameters for extreme Legal/Reputation losses.	α=2.75–3.5
+_SME_STAGE_CONTROL_MAP_FALLBACK	These are fallback, per Tactic, control strength ranges that are used when the core model is used in standalone mode (without mitre_control_strength_dashboard.py).	(0.4, 0.95)
+Key Simulation Mechanics
+Attack Progression
+Attackers move through tactics sequentially.
+Each stage success probability is sampled from Beta(a,b) → derived from control strength ranges.
+Fallbacks and retries simulate detection and reattempts.
+Threat Adaptability
+Adaptability follows a logistic growth curve:
+\( p' = p + a * (1 - p) * p \)
+where ( a ) is a random adaptability draw between ADAPTABILITY_RANGE.
+Loss Composition
+For each successful chain:
+Draws per-category losses from lognormal bodies (bounded at 99.9% quantile).
+Adds Pareto tail events for rare, high-severity Legal/Reputation incidents.
+Impact controls scale down specific categories.
+Outputs
+CSVs summarizing raw results and AAL/SLE statistics.
+Dashboard PNGs: posterior distributions, ALE histograms, loss exceedance curves.
+Optional per-tactic parameter export via --print-control-strengths.
+Example Analysis Results CSV Files: Example_Analysis_CSV_Output
+
+Example Analysis Results Visualizations: Example_Analysis_Charts
+
+5. Integration Summary
+The system operates in a clear, modular chain:
+
+MITRE Dataset
+    ↓
+build_mitigation_influence_template.py
+    ↓
+mitigation_influence_template.csv
+    ↓
+build_technique_relevance_template.py
+    ↓
+technique_relevance.csv
+    ↓
+mitre_control_strength_dashboard.py
+    ↓
+filtered_summary_*.csv + HTML Dashboard
+    ↓
+cyber_incident_pymc.py
+    ↓
+Bayesian Monte Carlo Simulation → AAL / SLE / LEC
+This design allows analysts to plug in new threat profiles or updated control data without modifying the underlying model logic.
+
+6. Agent / Docker Enhancements
+Notes: at this time I am neither planning nor willing to share the code for the risk analysis Agent. That is a potential level of risk/exposure I am not willing to personally assume. This is included only as inspiration to show you what is possible using the core scripts as a starting point.
+
+While the public model includes the four standalone scripts described above, I will discuss here how I have personally enhanced and extended the functionality. What I describe is my own implementation of a simple program that functions as an autonomous FAIR–MITRE risk analysis Agent running inside a Docker container.
+
+Core Agent Capabilities
+Automated daily actor assessments pulling live threat data (e.g., Microsoft Security, SentinelOne, CISA, Cisco Talos, etc.).
+Batch modeling of multiple actors, each generating their own risk outputs.
+Dynamic file management, with all results timestamped and organized by actor.
+Self-healing file logic, ensuring outputs persist across container restarts.
+Automatic detection of ATT&CK dataset updates.
+The Agent has a number of capabilities that help streamline the process of performing threat group (MITRE ATT&CK Procedures) risk analyses. The Agent currently extracts all of the threat actors from the MITRE ATT&CK JSON file discussed above. It then compares that list of threat actors against a list of threat intelligence blog feeds (RSS, and while being sure to respect robot.txt) to understand how often those threat actors are mentioned. Using this data the Agent can provide a score for each threat actor representing its estimate of which threat actors are of greatest concern. I then have access to a web UI that allows me to provide my own input on the automated scoring, pushing particular threat actors up or down the list.
+
+The Agent then uses the scores to perform an automated risk analysis, using the core MCMC model scripts, for the top two threat actors. In performing the analysis it is able to generate the appropriate Technique Relevance CSV for each threat actor to ensure the analysis is reflective of the particular attack path(es) the actors utilize. Once the analysis is complete it then sends me a email containing the summary risk analysis results and the loss exceedance curves for those two threat actors.
+
+Example Daily Email: Email_Risk_Analysis_Email
+
+From there it then applies an adjustment to the scores to the threat actors that have been assessed to push them down the list, so the following day it can assess two more threat actors.
+
+Now this is great, but it also has a number of limitations. The Agent currently can only run the risk analyses using the default assumptions I have provided to it. It does not have the ability to change any of the variables such as TEF, Control Strength, Loss Magnitudes, etc. This has then lead me to begin thinking about the next evolution of the model and Agent.
+
+Conceptual LLM Integration (Future Enhancement)
+The next stage of development involves integrating a Language Model (LLM) layer to make the Agent self-tuning and context-aware.
+
+Planned functions include:
+
+Corpus Building and Utilization: A collection of vetted reports (e.g. Verizon DBIR, Cyentia IRIS, etc.) are gathered and the text, tables, and chart are extracted and turned into a corpus that the Agent can utilize to guide the adaptive variable tuning.
+Threat Intelligence Parsing: The LLM automatically extracts relevant ATT&CK techniques from narrative threat reports, supplementing the data obtained from the MITRE ATT&CK Procedures, to seed the relevance CSV.
+Adaptive Variable Tuning: The LLM reviews the corpus and threat intelligence feeds to tune parameters such as TEF, capability, adaptability, losses and control strength ranges (i.e. lower MFA control strength for a threat actor with a track record of bypassing MFA).
+Assumption Documentation: Each run generates a structured narrative summarizing model rationale and parameter decisions.
+Human-in-the-loop Feedback: Human reviewers approve or adjust LLM tuned parameters from previous risk analysis runs creating a feedback learning cycle.
+Improved Data Management: Move from saving data in CSV and JSON files to a single SQLite database (CSV and JSON files are still produced, but now primarily function as backups and audit trails).
+LLM Cost Management: The Agent will store assumptions and information on prior work, such as analyzing the corpus and threat intelligence feeds, to avoid reviewing the same data again and again. This is meant to limit the costs of repeated calls to the LLM to analyze the same data.
+Containerization: to hopefully improve security and portability, containerize (e.g. Docker) the Agent.
+This is all still a work in progress, but ultimately the aim would be to create an autonomous tier one Agentic AI risk analyst. That could leverage the core risk model in conjunction with MITRE ATT&CK Procedures, threat intelligence blogs and other sources to automatically perform risk analysis of the threat actors of greatest concern to an organization. The Agent would be able to adjust and log it s assumptions, perform the risk analysis, and receive feedback on those assumptions to inform/refine future analysis.
+
+At the end of the day I don't think this Agent could ever fully replace a human risk analyst, but I do think it could function pretty well as a tier one analyst and/or at the very least provide an initial analysis that could then be refined by a human analyst.
+
+Conclusion
+This framework is not just a risk calculator — it’s a simulation ecosystem connecting threat intelligence, control analytics, and Bayesian reasoning under one unified architecture.
+
+By combining MITRE ATT&CK structure with FAIR loss logic, it brings both technical fidelity and financial realism into cyber risk quantification.
+The modular design means that users can extend it — from simple CSV editing to full-fledged autonomous Agents or LLM-augmented decision systems.
+
+FAIR–MITRE ATT&CK Quantitative Cyber Risk Framework
+
+Copyright 2025 Debuire Théo
+
+This software incorporates public data from the MITRE ATT&CK® framework.
